@@ -71,6 +71,10 @@ class _PromptOptions(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+
+    Tokenized prompts may provide unresolved URL strings for video items.
+    With ``VLLM_EARLY_UUID_LOOKUPS=1``, the renderer probes UUID-backed
+    processor cache entries before resolving those sources.
     """
 
     media_io_kwargs: NotRequired[dict[str, dict[str, Any]] | None]

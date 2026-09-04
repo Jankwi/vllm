@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import hashlib
 import time
 import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
+from vllm import envs
 from vllm.inputs import (
     EmbedsInput,
     EmbedsPrompt,
@@ -32,6 +35,8 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
+from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalUUIDItems,
@@ -41,6 +46,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -69,6 +75,23 @@ logger = init_logger(__name__)
 
 
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
+
+
+@dataclass(frozen=True)
+class _DeferredMedia:
+    source: object
+    identifier: str | None
+
+    @classmethod
+    def from_source(cls, source: object, identifier: str | None) -> "_DeferredMedia":
+        if (
+            identifier is None
+            and envs.VLLM_AUTO_DERIVE_UUID
+            and isinstance(source, str)
+        ):
+            url_hash = hashlib.sha256(source.encode()).hexdigest()
+            identifier = f"url:{url_hash}"
+        return cls(source, identifier)
 
 
 class BaseRenderer(ABC, Generic[_T]):
@@ -846,6 +869,129 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
+    def _resolve_video_sources(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor: BaseMultiModalProcessor,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]],
+    ) -> tuple[
+        MultiModalDataDict,
+        MultiModalUUIDDict | None,
+        Mapping[str, Mapping[str, object]],
+    ]:
+        """Resolve URL-like video inputs after probing the processor cache.
+
+        Engine callers normally provide already-loaded video objects. String
+        items are treated as unresolved media sources so adapters can pass an
+        HTTP, data, or file URL through to vLLM without fetching it first.
+        UUID-backed cache hits become None before the media connector runs;
+        misses are fetched and decoded through vLLM's configured video loader.
+        """
+        video_data = mm_data.get("video")
+        if isinstance(video_data, str):
+            video_items: list[Any] = [video_data]
+        elif isinstance(video_data, (list, tuple)) and any(
+            isinstance(item, str) for item in video_data
+        ):
+            video_items = list(video_data)
+        else:
+            return mm_data, mm_uuids, media_io_kwargs
+
+        mm_config = self.model_config.multimodal_config
+        media_io_kwargs = (
+            merge_media_io_kwargs(
+                mm_config.media_io_kwargs if mm_config is not None else None,
+                dict(media_io_kwargs),
+            )
+            or {}
+        )
+
+        mm_uuid_items = parse_mm_uuids(mm_uuids)
+        video_uuids = mm_uuid_items.get("video")
+        if video_uuids is None:
+            video_identifiers: list[str | None] = [None] * len(video_items)
+        else:
+            if len(video_uuids) != len(video_items):
+                raise ValueError(
+                    "If given, multi_modal_uuids['video'] must have the same "
+                    "length as multi_modal_data['video']."
+                )
+            video_identifiers = list(video_uuids)
+
+        deferred_items = [
+            _DeferredMedia.from_source(item, identifier)
+            for item, identifier in zip(video_items, video_identifiers)
+        ]
+        resolved_identifiers = [item.identifier for item in deferred_items]
+
+        resolved_mm_uuids = mm_uuids
+        if resolved_identifiers != video_identifiers:
+            resolved_mm_uuids = dict(mm_uuids or {})
+            resolved_mm_uuids["video"] = resolved_identifiers
+            mm_uuid_items = dict(mm_uuid_items)
+            mm_uuid_items["video"] = resolved_identifiers
+
+        cached = [False] * len(video_items)
+        cache = mm_processor.cache
+        if (
+            envs.VLLM_EARLY_UUID_LOOKUPS
+            and cache is not None
+            and any(identifier is not None for identifier in resolved_identifiers)
+        ):
+            probe_items = mm_processor.info.parse_mm_data(
+                {"video": [None] * len(video_items)}
+            )
+            probe_inputs = MMProcessorInputs(
+                prompt,
+                probe_items,
+                mm_uuid_items,
+                hf_processor_mm_kwargs=mm_processor_kwargs or {},
+                media_io_kwargs=media_io_kwargs,
+            )
+            hashes = probe_inputs.get_mm_hashes(
+                mm_processor.info.model_id,
+                mm_processor.info.ctx.get_mm_config().mm_hasher_algorithm,
+            ).get("video", [])
+            if len(hashes) != len(video_items):
+                raise RuntimeError(
+                    "Video UUID hash count does not match unresolved inputs."
+                )
+            cached = [
+                identifier is not None and cache.is_cached_item(mm_hash)
+                for identifier, mm_hash in zip(resolved_identifiers, hashes)
+            ]
+
+        connector = None
+        video_processor = get_video_processor_cls_name(self.model_config)
+        resolved_items = []
+        for item, is_cached in zip(deferred_items, cached):
+            if not isinstance(item.source, str):
+                resolved_items.append(item.source)
+            elif is_cached:
+                resolved_items.append(None)
+            else:
+                if connector is None:
+                    connector = MediaConnector(
+                        media_io_kwargs=dict(media_io_kwargs),
+                        allowed_local_media_path=(
+                            self.model_config.allowed_local_media_path
+                        ),
+                        allowed_media_domains=(self.model_config.allowed_media_domains),
+                    )
+                resolved_items.append(
+                    connector.fetch_video(
+                        item.source,
+                        video_processor=video_processor,
+                    )
+                )
+
+        resolved_mm_data = dict(mm_data)
+        resolved_mm_data["video"] = resolved_items
+        return resolved_mm_data, resolved_mm_uuids, media_io_kwargs
+
     def _process_multimodal(
         self,
         prompt: list[int],
@@ -863,6 +1009,15 @@ class BaseRenderer(ABC, Generic[_T]):
 
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
+        media_io_kwargs = dict(media_io_kwargs or {})
+        mm_data, mm_uuids, media_io_kwargs = self._resolve_video_sources(
+            prompt,
+            mm_data,
+            mm_uuids,
+            mm_processor,
+            mm_processor_kwargs,
+            media_io_kwargs,
+        )
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
 
@@ -875,7 +1030,7 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_data_items,
             mm_uuid_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
-            media_io_kwargs=media_io_kwargs or {},
+            media_io_kwargs=media_io_kwargs,
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 

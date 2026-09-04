@@ -43,6 +43,22 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["VLLM_EARLY_UUID_LOOKUPS", "VLLM_AUTO_DERIVE_UUID"],
+)
+def test_media_uuid_flags_are_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+):
+    monkeypatch.delenv(name, raising=False)
+    assert environment_variables[name]() is False
+
+    monkeypatch.setenv(name, "1")
+    assert environment_variables[name]() is True
+    assert name not in envs.compile_factors()
+
+
 def test_scale_out_endpoints_flag_is_runtime_only(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "1")
 
