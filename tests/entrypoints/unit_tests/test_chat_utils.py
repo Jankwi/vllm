@@ -1010,6 +1010,51 @@ def test_parse_chat_messages_empty_video_embeds_with_uuid(
     _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[uuid])
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True])
+async def test_omitted_video_url_adds_cached_audio_with_uuid(
+    use_async: bool,
+    qwen25omni_model_config_mm_interleaved,
+):
+    """Audio-in-video cache lookups require paired empty media items."""
+    uuid = "test-video-audio-uuid"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this video."},
+                {
+                    "type": "video_url",
+                    "video_url": {},
+                    "uuid": uuid,
+                },
+            ],
+        }
+    ]
+    kwargs = {
+        "content_format": "string",
+        "mm_processor_kwargs": {"use_audio_in_video": True},
+    }
+
+    if use_async:
+        _, mm_data, mm_uuids = await parse_chat_messages_async(
+            messages,
+            qwen25omni_model_config_mm_interleaved,
+            **kwargs,
+        )
+    else:
+        _, mm_data, mm_uuids = parse_chat_messages(
+            messages,
+            qwen25omni_model_config_mm_interleaved,
+            **kwargs,
+        )
+
+    _assert_mm_data_inputs(mm_data, {"audio": 1, "video": 1})
+    assert mm_data == {"audio": [None], "video": [None]}
+    _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[uuid])
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[uuid])
+
+
 def test_parse_chat_messages_video_embeds_with_string(
     qwen25omni_model_config_video_embeds,
 ):

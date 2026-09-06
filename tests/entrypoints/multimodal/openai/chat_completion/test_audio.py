@@ -84,6 +84,51 @@ def dummy_messages_from_audio_url(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_omitted_audio_url_reuses_cached_uuid(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    audio_url = TEST_AUDIO_URLS[0]
+    audio_uuid = "test-audio-uuid"
+
+    def make_messages(url: str | None) -> list[dict]:
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "audio_url",
+                        "audio_url": None if url is None else {"url": url},
+                        "uuid": audio_uuid,
+                    },
+                    {"type": "text", "text": "What's happening in this audio?"},
+                ],
+            }
+        ]
+
+    cached_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=make_messages(audio_url),
+        max_completion_tokens=8,
+        temperature=0.0,
+    )
+    reused_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=make_messages(None),
+        max_completion_tokens=8,
+        temperature=0.0,
+    )
+
+    assert cached_completion.choices[0].finish_reason == "length"
+    assert reused_completion.choices[0].finish_reason == "length"
+    assert cached_completion.usage is not None
+    assert reused_completion.usage is not None
+    assert (
+        reused_completion.usage.prompt_tokens == cached_completion.usage.prompt_tokens
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("audio_url", [TEST_AUDIO_URLS[0]])
 async def test_single_chat_session_audio(
     client: openai.AsyncOpenAI, model_name: str, audio_url: str

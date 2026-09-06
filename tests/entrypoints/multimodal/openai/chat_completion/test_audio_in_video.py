@@ -94,6 +94,58 @@ async def test_online_audio_in_video(
 
 @pytest.mark.core_model
 @pytest.mark.asyncio
+async def test_omitted_video_url_reuses_cached_audio_and_video(
+    client: openai.AsyncOpenAI, video_assets: VideoTestAssets
+):
+    """A UUID-only video request must retrieve its paired cached audio."""
+    video_path = video_assets[0].video_path
+    with open(video_path, "rb") as f:
+        video_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+    video_url = f"data:video/mp4;base64,{video_base64}"
+    video_uuid = "test-video-audio-uuid"
+
+    def make_messages(url: str | None) -> list[dict]:
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this video?"},
+                    {
+                        "type": "video_url",
+                        "video_url": {} if url is None else {"url": url},
+                        "uuid": video_uuid,
+                    },
+                ],
+            }
+        ]
+
+    request_kwargs = {
+        "model": MODEL_NAME,
+        "max_tokens": 8,
+        "temperature": 0.0,
+        "extra_body": {"mm_processor_kwargs": {"use_audio_in_video": True}},
+    }
+    cached_completion = await client.chat.completions.create(
+        messages=make_messages(video_url),
+        **request_kwargs,
+    )
+    reused_completion = await client.chat.completions.create(
+        messages=make_messages(None),
+        **request_kwargs,
+    )
+
+    assert cached_completion.choices[0].finish_reason == "length"
+    assert reused_completion.choices[0].finish_reason == "length"
+    assert cached_completion.usage is not None
+    assert reused_completion.usage is not None
+    assert (
+        reused_completion.usage.prompt_tokens == cached_completion.usage.prompt_tokens
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.asyncio
 async def test_online_audio_in_video_multi_videos(
     client: openai.AsyncOpenAI, video_assets: VideoTestAssets
 ):

@@ -19,6 +19,7 @@ from vllm.multimodal.audio import (
     resample_audio_scipy,
     split_audio,
 )
+from vllm.multimodal.parse import MultiModalDataParser
 
 
 @pytest.fixture
@@ -108,6 +109,13 @@ def test_audio_resampler_no_target_sr(dummy_audio):
     resampler = AudioResampler(target_sr=None)
     with pytest.raises(RuntimeError):
         resampler.resample(dummy_audio, orig_sr=44100)
+
+
+def test_audio_parser_preserves_cached_placeholder():
+    """A UUID-only audio request must reach the multimodal cache layer."""
+    parsed = MultiModalDataParser().parse_mm_data({"audio": [None]})
+
+    assert parsed["audio"].get_all() == [None]
 
 
 # ============================================================
