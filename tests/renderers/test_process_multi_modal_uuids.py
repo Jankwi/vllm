@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from copy import deepcopy
+from copy import copy, deepcopy
 from http import HTTPStatus
 from unittest.mock import AsyncMock, Mock
 
@@ -272,6 +272,19 @@ def test_uuid_only_cache_miss_names_every_missing_item(use_async):
         _render_chat(renderer, [messages], ChatParams(), use_async)
 
     assert exc_info.value.missing_idxs == {"image": [0, 1]}
+
+
+def test_cache_miss_error_keeps_missing_idxs_when_copied():
+    """Copying keeps the message and the indices, as pickling does."""
+    error = MultiModalProcessorCacheMissError(
+        "Cache miss for image at index 0, 2 but data is not provided.",
+        missing_idxs={"image": [0, 2]},
+    )
+
+    for rebuilt in (copy(error), deepcopy(error)):
+        assert type(rebuilt) is MultiModalProcessorCacheMissError
+        assert str(rebuilt) == str(error)
+        assert rebuilt.missing_idxs == {"image": [0, 2]}
 
 
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])

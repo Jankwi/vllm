@@ -999,10 +999,16 @@ class MultiModalProcessorCacheMissError(ValueError):
 
     """
 
-    def __init__(self, message: str, missing_idxs: Mapping[str, Sequence[int]]):
+    # The default lets pickle and copy rebuild the error from its message.
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing_idxs: Mapping[str, Sequence[int]] | None = None,
+    ) -> None:
         super().__init__(message)
         self.missing_idxs = {
-            modality: list(idxs) for modality, idxs in missing_idxs.items()
+            modality: list(idxs) for modality, idxs in (missing_idxs or {}).items()
         }
 
 
@@ -1407,7 +1413,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             missing_items = _describe_missing_idxs(mm_missing_idxs_without_data)
             raise MultiModalProcessorCacheMissError(
                 f"Cache miss for {missing_items} but data is not provided.",
-                mm_missing_idxs_without_data,
+                missing_idxs=mm_missing_idxs_without_data,
             )
 
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
@@ -1507,7 +1513,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             raise MultiModalProcessorCacheMissError(
                 "This processor skips the cache for this request, and data is "
                 f"not provided for {missing_items}.",
-                mm_idxs_without_data,
+                missing_idxs=mm_idxs_without_data,
             )
 
         with timing_ctx.record("apply_hf_processor"):
