@@ -990,12 +990,12 @@ def find_mm_placeholders(
 class MultiModalProcessorCacheMissError(ValueError):
     """Items have no media data, and the processor cannot get them from its cache.
 
-    A processor that skips the cache for a request raises this error for every
-    item that has no media data.
+    One error names every such item. When a request does not use the processor
+    cache, no item can come from the cache, so every item without media data is
+    named.
 
     Attributes:
-        missing_idxs: For each modality, the indices of the items that have no
-            media data.
+        missing_idxs: For each modality, the indices of the named items.
 
     """
 
