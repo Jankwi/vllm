@@ -1511,8 +1511,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         if mm_idxs_without_data:
             missing_items = _describe_missing_idxs(mm_idxs_without_data)
             raise MultiModalProcessorCacheMissError(
-                "This processor skips the cache for this request, and data is "
-                f"not provided for {missing_items}.",
+                "This request does not use the processor cache, and data is not "
+                f"provided for {missing_items}.",
                 missing_idxs=mm_idxs_without_data,
             )
 

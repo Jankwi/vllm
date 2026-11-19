@@ -330,7 +330,7 @@ def test_processor_that_skips_the_cache_names_every_item_without_data(
     with pytest.raises(
         MultiModalProcessorCacheMissError,
         match=(
-            r"^This processor skips the cache for this request, and data is not "
+            r"^This request does not use the processor cache, and data is not "
             rf"provided for image at index {described_idxs}\.$"
         ),
     ) as exc_info:
@@ -338,6 +338,25 @@ def test_processor_that_skips_the_cache_names_every_item_without_data(
 
     assert exc_info.value.missing_idxs == {"image": list(uuid_only_idxs)}
     assert fetch_image.call_count == 3 - len(uuid_only_idxs)
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_uuid_only_item_without_the_cache_is_named(use_async):
+    """With the processor cache off, an item without data gets the same error."""
+    renderer = _build_renderer(mm_cache_gb=0)
+    messages = _media_messages("Describe", ("image_url", "image"))
+    messages[0]["content"][1]["image_url"] = None
+
+    with pytest.raises(
+        MultiModalProcessorCacheMissError,
+        match=(
+            r"^This request does not use the processor cache, and data is not "
+            r"provided for image at index 0\.$"
+        ),
+    ) as exc_info:
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert exc_info.value.missing_idxs == {"image": [0]}
 
 
 def test_batch_cache_misses_refetch_media_concurrently(monkeypatch):
