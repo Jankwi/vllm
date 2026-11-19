@@ -990,6 +990,9 @@ def find_mm_placeholders(
 class MultiModalProcessorCacheMissError(ValueError):
     """Items have no media data, and the processor cannot get them from its cache.
 
+    A processor that skips the cache for a request raises this error for every
+    item that has no media data.
+
     Attributes:
         missing_idxs: For each modality, the indices of the items that have no
             media data.
@@ -1492,6 +1495,21 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalProcessingResult:
+        # Without the cache, every item needs its media data.
+        mm_idxs_without_data: dict[str, list[int]] = {}
+        for modality, items in inputs.mm_data_items.items():
+            for idx in range(len(items)):
+                if items[idx] is None:
+                    mm_idxs_without_data.setdefault(modality, []).append(idx)
+
+        if mm_idxs_without_data:
+            missing_items = _describe_missing_idxs(mm_idxs_without_data)
+            raise MultiModalProcessorCacheMissError(
+                "This processor skips the cache for this request, and data is "
+                f"not provided for {missing_items}.",
+                mm_idxs_without_data,
+            )
+
         with timing_ctx.record("apply_hf_processor"):
             mm_processed_data = self._apply_hf_processor_main(
                 mm_items=inputs.mm_data_items,
