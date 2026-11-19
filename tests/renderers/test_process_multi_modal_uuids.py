@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from copy import deepcopy
+from copy import copy, deepcopy
 from http import HTTPStatus
 from unittest.mock import AsyncMock, Mock
 
@@ -32,6 +32,7 @@ mary_had_lamb_audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
 
 QWEN25_VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN25_OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
+DEEPSEEK_VL2_MODEL_ID = "deepseek-ai/deepseek-vl2-tiny"
 
 
 def _build_renderer(
@@ -53,6 +54,22 @@ def _build_renderer(
 
     return HfRenderer(
         vllm_config,
+        cached_tokenizer_from_config(model_config),
+    )
+
+
+def _build_deepseek_vl2_renderer() -> HfRenderer:
+    # DeepSeek-VL2 skips the processor cache for more than two images.
+    model_config = ModelConfig(
+        model=DEEPSEEK_VL2_MODEL_ID,
+        hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
+        limit_mm_per_prompt={"image": 3},
+        max_model_len=4096,
+        mm_processor_cache_gb=4,
+    )
+
+    return HfRenderer(
+        VllmConfig(model_config=model_config),
         cached_tokenizer_from_config(model_config),
     )
 
@@ -236,6 +253,140 @@ def test_uuid_only_cache_miss_is_not_retried(monkeypatch, use_async):
         _render_chat(renderer, [messages], ChatParams(), use_async)
 
     assert process.call_count == 1
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_uuid_only_cache_miss_names_every_missing_item(use_async):
+    """The error names every item that misses the cache without data."""
+    renderer = _build_renderer()
+    messages = _media_messages(
+        "Describe", ("image_url", "image-0"), ("image_url", "image-1")
+    )
+    for part in messages[0]["content"][1:]:
+        part["image_url"] = None
+
+    with pytest.raises(
+        MultiModalProcessorCacheMissError,
+        match=r"^Cache miss for image at index 0, 1 but data is not provided\.$",
+    ) as exc_info:
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert exc_info.value.missing_idxs == {"image": [0, 1]}
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_cache_miss_error_names_only_items_the_cache_lacks(monkeypatch, use_async):
+    """A cached item without data is not named, and each modality is listed."""
+    renderer = _build_renderer()
+    _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    warm = _media_messages("Warm", ("image_url", "cached-image"))
+    _render_chat(renderer, [warm], ChatParams(), use_async)
+    messages = _media_messages(
+        "Describe",
+        ("image_url", "cached-image"),
+        ("image_url", "missing-image"),
+        ("video_url", "missing-video"),
+    )
+    for part in messages[0]["content"][1:]:
+        part[part["type"]] = None
+
+    with pytest.raises(
+        MultiModalProcessorCacheMissError,
+        match=(
+            r"^Cache miss for image at index 1; video at index 0 but data is not "
+            r"provided\.$"
+        ),
+    ) as exc_info:
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert exc_info.value.missing_idxs == {"image": [1], "video": [0]}
+
+
+def test_cache_miss_error_keeps_missing_idxs_when_copied():
+    """Copying keeps the message and the indices, as pickling does."""
+    error = MultiModalProcessorCacheMissError(
+        "Cache miss for image at index 0, 2 but data is not provided.",
+        missing_idxs={"image": [0, 2]},
+    )
+
+    for rebuilt in (copy(error), deepcopy(error)):
+        assert type(rebuilt) is MultiModalProcessorCacheMissError
+        assert str(rebuilt) == str(error)
+        assert rebuilt.missing_idxs == {"image": [0, 2]}
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_processor_that_skips_the_cache_gets_the_media(monkeypatch, use_async):
+    """A deferred request that skips the cache is retried with its media."""
+    renderer = _build_deepseek_vl2_renderer()
+    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    process = _wrap_process_for_engine(monkeypatch, renderer, use_async)
+    messages = _media_messages(
+        "Describe", *[("image_url", f"image-{i}") for i in range(3)]
+    )
+
+    _, deferred = _render_chat(renderer, [messages], ChatParams(), use_async)
+    deferred_counts = (process.call_count, fetch_image.call_count)
+    _, upfront = _render_chat(
+        renderer, [messages], ChatParams(skip_early_mm_lookup=True), use_async
+    )
+
+    # Deferred: one render without media, then the retry. Upfront: one render.
+    assert deferred_counts == (2, 3)
+    assert (process.call_count, fetch_image.call_count) == (3, 6)
+    assert deferred[0]["prompt_token_ids"] == upfront[0]["prompt_token_ids"]
+    assert deferred[0]["mm_hashes"] == upfront[0]["mm_hashes"]
+    assert deferred[0]["mm_placeholders"] == upfront[0]["mm_placeholders"]
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("uuid_only_idxs", "described_idxs"),
+    [((0, 1, 2), "0, 1, 2"), ((0, 2), "0, 2")],
+    ids=["all-uuid-only", "some-uuid-only"],
+)
+def test_processor_that_skips_the_cache_names_every_item_without_data(
+    monkeypatch, use_async, uuid_only_idxs, described_idxs
+):
+    """Items without a URL fail with the cache-miss error, after any retry."""
+    renderer = _build_deepseek_vl2_renderer()
+    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    messages = _media_messages(
+        "Describe", *[("image_url", f"image-{i}") for i in range(3)]
+    )
+    for idx in uuid_only_idxs:
+        messages[0]["content"][1 + idx]["image_url"] = None
+
+    with pytest.raises(
+        MultiModalProcessorCacheMissError,
+        match=(
+            r"^This request does not use the processor cache, and data is not "
+            rf"provided for image at index {described_idxs}\.$"
+        ),
+    ) as exc_info:
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert exc_info.value.missing_idxs == {"image": list(uuid_only_idxs)}
+    assert fetch_image.call_count == 3 - len(uuid_only_idxs)
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_uuid_only_item_without_the_cache_is_named(use_async):
+    """With the processor cache off, an item without data gets the same error."""
+    renderer = _build_renderer(mm_cache_gb=0)
+    messages = _media_messages("Describe", ("image_url", "image"))
+    messages[0]["content"][1]["image_url"] = None
+
+    with pytest.raises(
+        MultiModalProcessorCacheMissError,
+        match=(
+            r"^This request does not use the processor cache, and data is not "
+            r"provided for image at index 0\.$"
+        ),
+    ) as exc_info:
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert exc_info.value.missing_idxs == {"image": [0]}
 
 
 def test_batch_cache_misses_refetch_media_concurrently(monkeypatch):
