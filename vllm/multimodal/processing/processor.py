@@ -988,7 +988,26 @@ def find_mm_placeholders(
 
 
 class MultiModalProcessorCacheMissError(ValueError):
-    """A processor cache miss for an item whose media data was omitted."""
+    """Items have no media data, and the processor cannot get them from its cache.
+
+    Attributes:
+        missing_idxs: For each modality, the indices of the items that have no
+            media data.
+
+    """
+
+    def __init__(self, message: str, missing_idxs: Mapping[str, Sequence[int]]):
+        super().__init__(message)
+        self.missing_idxs = {
+            modality: list(idxs) for modality, idxs in missing_idxs.items()
+        }
+
+
+def _describe_missing_idxs(missing_idxs: Mapping[str, Sequence[int]]) -> str:
+    return "; ".join(
+        f"{modality} at index {', '.join(map(str, idxs))}"
+        for modality, idxs in missing_idxs.items()
+    )
 
 
 MultiModalIsCached = dict[str, list[bool]]
@@ -1366,6 +1385,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         }
 
         mm_missing_data = {}
+        mm_missing_idxs_without_data: dict[str, list[int]] = {}
         for modality, idxs in mm_missing_idxs.items():
             if not idxs:
                 continue
@@ -1374,14 +1394,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for idx in idxs:
                 data = mm_data_items[modality][idx]
                 if data is None:
-                    raise MultiModalProcessorCacheMissError(
-                        f"Cache miss for {modality} at index {idx} "
-                        f"but data is not provided."
-                    )
+                    mm_missing_idxs_without_data.setdefault(modality, []).append(idx)
                 else:
                     missing_modality_data.append(data)
 
             mm_missing_data[modality] = missing_modality_data
+
+        if mm_missing_idxs_without_data:
+            missing_items = _describe_missing_idxs(mm_missing_idxs_without_data)
+            raise MultiModalProcessorCacheMissError(
+                f"Cache miss for {missing_items} but data is not provided.",
+                mm_missing_idxs_without_data,
+            )
 
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 

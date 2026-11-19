@@ -238,6 +238,25 @@ def test_uuid_only_cache_miss_is_not_retried(monkeypatch, use_async):
     assert process.call_count == 1
 
 
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_uuid_only_cache_miss_names_every_missing_item(use_async):
+    """The error names every item that misses the cache without data."""
+    renderer = _build_renderer()
+    messages = _media_messages(
+        "Describe", ("image_url", "image-0"), ("image_url", "image-1")
+    )
+    for part in messages[0]["content"][1:]:
+        part["image_url"] = None
+
+    with pytest.raises(
+        MultiModalProcessorCacheMissError,
+        match=r"^Cache miss for image at index 0, 1 but data is not provided\.$",
+    ) as exc_info:
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert exc_info.value.missing_idxs == {"image": [0, 1]}
+
+
 def test_batch_cache_misses_refetch_media_concurrently(monkeypatch):
     """Retried conversations fetch media concurrently and keep the batch order."""
     renderer = _build_renderer()
