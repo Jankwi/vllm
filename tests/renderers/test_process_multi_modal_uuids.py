@@ -292,18 +292,20 @@ def test_processor_that_skips_the_cache_gets_the_media(monkeypatch, use_async):
     """A deferred request that skips the cache is retried with its media."""
     renderer = _build_deepseek_vl2_renderer()
     fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    process = _wrap_process_for_engine(monkeypatch, renderer, use_async)
     messages = _media_messages(
         "Describe", *[("image_url", f"image-{i}") for i in range(3)]
     )
 
     _, deferred = _render_chat(renderer, [messages], ChatParams(), use_async)
-    deferred_fetches = fetch_image.call_count
+    deferred_counts = (process.call_count, fetch_image.call_count)
     _, upfront = _render_chat(
         renderer, [messages], ChatParams(skip_early_mm_lookup=True), use_async
     )
 
-    assert deferred_fetches == 3
-    assert fetch_image.call_count == 6
+    # Deferred: one render without media, then the retry. Upfront: one render.
+    assert deferred_counts == (2, 3)
+    assert (process.call_count, fetch_image.call_count) == (3, 6)
     assert deferred[0]["prompt_token_ids"] == upfront[0]["prompt_token_ids"]
     assert deferred[0]["mm_hashes"] == upfront[0]["mm_hashes"]
     assert deferred[0]["mm_placeholders"] == upfront[0]["mm_placeholders"]
