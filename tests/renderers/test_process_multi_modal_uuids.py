@@ -274,6 +274,34 @@ def test_uuid_only_cache_miss_names_every_missing_item(use_async):
     assert exc_info.value.missing_idxs == {"image": [0, 1]}
 
 
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_cache_miss_error_names_only_items_the_cache_lacks(monkeypatch, use_async):
+    """A cached item without data is not named, and each modality is listed."""
+    renderer = _build_renderer()
+    _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
+    warm = _media_messages("Warm", ("image_url", "cached-image"))
+    _render_chat(renderer, [warm], ChatParams(), use_async)
+    messages = _media_messages(
+        "Describe",
+        ("image_url", "cached-image"),
+        ("image_url", "missing-image"),
+        ("video_url", "missing-video"),
+    )
+    for part in messages[0]["content"][1:]:
+        part[part["type"]] = None
+
+    with pytest.raises(
+        MultiModalProcessorCacheMissError,
+        match=(
+            r"^Cache miss for image at index 1; video at index 0 but data is not "
+            r"provided\.$"
+        ),
+    ) as exc_info:
+        _render_chat(renderer, [messages], ChatParams(), use_async)
+
+    assert exc_info.value.missing_idxs == {"image": [1], "video": [0]}
+
+
 def test_cache_miss_error_keeps_missing_idxs_when_copied():
     """Copying keeps the message and the indices, as pickling does."""
     error = MultiModalProcessorCacheMissError(
